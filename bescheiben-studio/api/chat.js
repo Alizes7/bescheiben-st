@@ -1,63 +1,65 @@
-'use strict';
-
-/**
- * Vercel Serverless Function — POST /api/chat
- *
- * Acts as a secure proxy to the Anthropic Messages API.
- * The ANTHROPIC_API_KEY environment variable is set in the Vercel dashboard
- * and never exposed to the browser.
- *
- * Expected request body:
- * {
- *   system:   string,
- *   messages: Array<{ role: 'user' | 'assistant', content: string }>
- * }
- */
 module.exports = async function handler(req, res) {
-  // Only allow POST
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  // CORS obrigatório
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  // Use Gemini (gratuito) - obtenha chave em makersuite.google.com
+  const apiKey = process.env.GEMINI_API_KEY;
+  
   if (!apiKey) {
-    console.error('[api/chat] ANTHROPIC_API_KEY is not set');
-    return res.status(500).json({ error: 'API key not configured on the server.' });
+    console.error('GEMINI_API_KEY não configurada');
+    return res.status(500).json({ error: 'API key não configurada' });
   }
 
-  const { system, messages } = req.body || {};
-
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ error: 'messages array is required.' });
-  }
+  const { messages, system } = req.body || {};
+  const prompt = messages?.[0]?.content || '';
+  
+  // Contexto B2B específico para a Bescheiben
+  const b2bContext = system || `Você é um especialista em marketing B2B da agência Bescheiben. 
+    Crie conteúdo estratégico focado em geração de leads qualificados, não awareness genérico. 
+    Tom: profissional, autoridade, dados-driven.`;
 
   try {
-    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type':    'application/json',
-        'x-api-key':       apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model:      'claude-sonnet-4-20250514',
-        max_tokens: 1200,
-        system:     system || '',
-        messages,
-      }),
-    });
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            role: 'user',
+            parts: [{ text: `${b2bContext}\n\nSolicitação: ${prompt}` }]
+          }],
+          generationConfig: {
+            temperature: 0.8,
+            maxOutputTokens: 1500,
+            topP: 0.9
+          }
+        })
+      }
+    );
 
-    const data = await anthropicRes.json();
-
-    if (!anthropicRes.ok) {
-      console.error('[api/chat] Anthropic error:', data);
-      return res.status(anthropicRes.status).json({ error: data.error?.message || 'Anthropic API error' });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error?.message || 'Erro na API Gemini');
     }
 
-    return res.status(200).json(data);
+    const data = await response.json();
+    
+    // Formato compatível com seu frontend
+    return res.status(200).json({
+      content: [{ text: data.candidates[0].content.parts[0].text }],
+      usage: { model: 'gemini-1.5-flash' }
+    });
 
-  } catch (err) {
-    console.error('[api/chat] Unexpected error:', err);
-    return res.status(500).json({ error: 'Internal server error: ' + err.message });
+  } catch (error) {
+    console.error('Erro:', error);
+    return res.status(500).json({ 
+      error: 'Falha na geração: ' + error.message 
+    });
   }
 };
